@@ -1,0 +1,580 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Globalization;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Rendering;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Authorization;
+using MPM.Models;
+using System.Web;
+using System.IO;
+using System.Text;
+using OfficeOpenXml;
+using System.Net;
+using Microsoft.AspNetCore.Identity;
+
+namespace MPM.Controllers
+{
+    [Authorize]
+    public class ProductsController : Controller
+    {
+        private readonly mpmContext _context;
+
+        public ProductsController(mpmContext context)
+        {
+            _context = context;
+        }
+
+        // GET: Products
+        public async Task<IActionResult> Index()
+        {
+            return View(await _context.Products.ToListAsync());
+        }
+
+        public JsonResult ViewProducts()
+        {
+            //return Json(_context.Products.Select(x => new { x.ProductCode, x.ProductName, x.Category, x.Category2, x.Brand, x.OEM, x.Color, x.Size, x.SellingUnit, x.SellingPrice }));
+            return Json(_context.Products);
+        }
+
+        public IActionResult ProductList()
+        {
+            ViewBag.Category = new SelectList(_context.Products.OrderBy(x => x.Category).Select(x => x.Category).Distinct());
+            ViewBag.Category2 = new SelectList("");
+
+            //return Json( new { Data = _context.Products.Select(x => new { x.ProductCode, x.ProductName, x.Category, x.Category2 }) });
+            //return Json(_context.Products.Select(x => new { x.ProductCode, x.ProductName, x.Category, x.Category2 }));
+
+            return View(_context.Products);
+        }
+
+        // public async Task<IActionResult> ProductList(int pageNumber, int recordCount)
+        // {
+        //     ViewBag.Category = new SelectList(_context.Products.OrderBy(x => x.Category).Select(x => x.Category).Distinct());
+        //     ViewBag.Category2 = new SelectList("");
+        //     return View(await _context.Products.ToListAsync());
+
+        //     //return Json(_context.Products);
+        // }
+
+        public IActionResult getCategories()
+        {
+            var categories = _context.Products.OrderBy(x => x.Category).Select(x => x.Category).Distinct();
+            return Json(categories);
+        }
+
+        public IActionResult getCategory2(string strCategory)
+        {
+            var categories =  _context.Products.Where(x => x.Category == strCategory).OrderBy(x => x.Category2).Select(x => x.Category2).Distinct();            
+            var result = Json(categories);
+
+            return Json(categories);
+        }
+
+        // GET: Products/Details/5
+        public async Task<IActionResult> Details(string id = null)
+        {
+            if (id == null)
+            {
+                return NotFound();
+            }
+
+            var products = await _context.Products.Include(m => m.PriceHistory)
+                .Include(m => m.CompetitorProducts).ThenInclude(n => n.CompetitorPriceHistory)
+                .FirstOrDefaultAsync(m => m.ProductCode == id);
+
+            //products.CompetitorPriceHistory = _context.CompetitorPriceHistory.ToList();
+
+            if (products == null)
+            {
+                return NotFound();
+            }
+
+            if (products.PriceHistory.Where(m => m.Status == "Pending").Count() > 0) {
+                IEnumerable<PriceHistory> pendingPrice = products.PriceHistory.Where(m => m.Status == "Pending");
+                StringBuilder returnText = new StringBuilder();
+                foreach (PriceHistory pHist in pendingPrice)
+                {
+                    returnText.AppendLine( this.calculateGPM(pHist.NewPrice, pHist.ProductCodeNavigation.UnitCost, pHist.ProductCodeNavigation.Quantity));
+                    ViewBag.NewSellingPrice = pHist.NewPrice;
+                }
+                ViewBag.NewGPM = returnText.ToString();
+            }
+
+            return View(products);
+        }
+
+        [HttpPost]
+        //for adding Price History based on new Selling Price entered
+        public async Task<IActionResult> Details(string id, string newSellingPrice, string type, string newGPM)
+        {
+            if (id == null)
+            {
+                return NotFound();
+            }
+
+            var products = await _context.Products.Include(m => m.PriceHistory)
+                .Include(m => m.CompetitorProducts).ThenInclude(n => n.CompetitorPriceHistory)
+                .FirstOrDefaultAsync(m => m.ProductCode == id);
+
+            if (products == null)
+            {
+                return NotFound();
+            }
+
+            if (products.PriceHistory.Where(m => m.Status == "Pending").Count() > 0) {
+                IEnumerable<PriceHistory> pendingPrice = products.PriceHistory.Where(m => m.Status == "Pending");
+                StringBuilder returnText = new StringBuilder();
+                foreach (PriceHistory pHist in pendingPrice)
+                {
+                    returnText.AppendLine( this.calculateGPM(pHist.NewPrice, pHist.ProductCodeNavigation.UnitCost, pHist.ProductCodeNavigation.Quantity));
+                    ViewBag.NewSellingPrice = pHist.NewPrice;
+                }
+                ViewBag.NewGPM = returnText.ToString();
+            }
+
+            //adding price history
+            if (ModelState.IsValid)
+            {
+                double _newSellingPrice = 0;
+                if (type == "GPM")
+                {
+                    _newSellingPrice = getSellingPriceByGPM(Convert.ToDouble(newGPM), products.UnitCost, products.Quantity);
+                }
+                else
+                {
+                    _newSellingPrice = Convert.ToDouble(newSellingPrice);
+                }
+                PriceHistory priceHist = new PriceHistory();
+                priceHist.OldPrice = products.SellingPrice;
+                priceHist.NewPrice = Convert.ToDouble(_newSellingPrice);
+                priceHist.UpdateDate = DateTime.Now;
+                priceHist.UpdatedBy = User.Identity.Name;
+
+                products.PriceHistory.Add(priceHist);
+                _context.PriceHistory.Add(priceHist);
+                _context.SaveChanges();
+            }
+
+            ViewBag.Message = "New Price successfully added and is pending for approval.";
+            return View(products);
+        }
+
+        // GET: Products/Create
+        public IActionResult Create()
+        {
+            return View();
+        }
+
+        // POST: Products/Create
+        // To protect from overposting attacks, please enable the specific properties you want to bind to, for 
+        // more details see http://go.microsoft.com/fwlink/?LinkId=317598.
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> Create([Bind("ProductCode,Brand,ProductName,Description,Description2,Category,Color,Size,SellingUnit,UnitCost,SellingPrice,Status,CreateDate")] Products products)
+        {
+            if (ModelState.IsValid)
+            {
+                _context.Add(products);
+                await _context.SaveChangesAsync();
+                return RedirectToAction(nameof(Index));
+            }
+            return View(products);
+        }
+
+        // GET: Products/Edit/5
+        public async Task<IActionResult> Edit(int? id)
+        {
+            if (id == null)
+            {
+                return NotFound();
+            }
+
+            var products = await _context.Products.FindAsync(id);
+            if (products == null)
+            {
+                return NotFound();
+            }
+            return View(products);
+        }
+
+        // POST: Products/Edit/5
+        // To protect from overposting attacks, please enable the specific properties you want to bind to, for 
+        // more details see http://go.microsoft.com/fwlink/?LinkId=317598.
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> Edit(string id, [Bind("ProductCode,Brand,ProductName,Description,Description2,Category,Color,Size,SellingUnit,UnitCost,SellingPrice,Status,CreateDate")] Products products)
+        {
+            if (id != products.ProductCode)
+            {
+                return NotFound();
+            }
+
+            if (ModelState.IsValid)
+            {
+                try
+                {
+                    _context.Update(products);
+                    await _context.SaveChangesAsync();
+                }
+                catch (DbUpdateConcurrencyException)
+                {
+                    if (!ProductsExists(products.ProductCode))
+                    {
+                        return NotFound();
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
+                return RedirectToAction(nameof(Index));
+            }
+            return View(products);
+        }
+
+        // GET: Products/Delete/5
+        public async Task<IActionResult> Delete(string id)
+        {
+            if (id == null)
+            {
+                return NotFound();
+            }
+
+            var products = await _context.Products
+                .FirstOrDefaultAsync(m => m.ProductCode == id);
+            if (products == null)
+            {
+                return NotFound();
+            }
+
+            return View(products);
+        }
+
+        // POST: Products/Delete/5
+        [HttpPost, ActionName("Delete")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> DeleteConfirmed(int id)
+        {
+            var products = await _context.Products.FindAsync(id);
+            _context.Products.Remove(products);
+            await _context.SaveChangesAsync();
+            return RedirectToAction(nameof(Index));
+        }
+
+        private bool ProductsExists(string id)
+        {
+            return _context.Products.Any(e => e.ProductCode == id);
+        }
+
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> AddNewPrice(string productCode, double oldPrice, double newPrice)
+        {
+            PriceHistory priceHist = new PriceHistory();
+            priceHist.ProductCode = productCode;
+            priceHist.OldPrice = oldPrice;
+            priceHist.NewPrice = newPrice;
+            priceHist.Status = "Pending";
+
+            _context.PriceHistory.Add(priceHist);
+            await _context.SaveChangesAsync();
+
+            return RedirectToAction(nameof(Details));
+        }
+
+        public IActionResult ImportInHouse()
+        {
+            var products = _context.Products;
+            return View(products.Take(1000));
+        }
+
+        [HttpPost]
+        public IActionResult ImportInHouse(IFormFile filename)
+        {
+            var products = _context.Products;
+            var mapping = _context.TableMapping.Where(p => p.MappingType == "QCA");
+
+            int updateCount = 0;
+            int insertCount = 0;
+            int skippedCount = 0;
+
+            using (var stream = new MemoryStream())
+            {
+                filename.CopyTo(stream);
+
+                using (ExcelPackage package = new ExcelPackage(stream))
+                {
+                    ExcelWorksheet workSheet = package.Workbook.Worksheets[0];
+                    int totalRows = workSheet.Dimension.Rows;
+
+                    TextInfo tInfo = new CultureInfo("en-US", false).TextInfo;
+                    List<Products> productList = new List<Products>();
+
+                    for (int i = 2; i <= totalRows; i++)
+                    {
+                        Products prod = new Products();
+
+                        try 
+                        {
+                            foreach(TableMapping m in mapping)
+                            {
+                                if (m.MappedData == "ProductCode")
+                                {
+                                    prod.ProductCode = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString().Trim();
+                                }
+
+                                if (m.MappedData == "Brand")
+                                {
+                                    string brand = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString();
+
+                                    //replace special space characters
+                                    brand = brand.Replace('\u00A0', ' ');
+
+                                    //use Camel case instead
+                                    brand = tInfo.ToTitleCase(brand.ToLower());
+
+                                    prod.Brand = brand.Trim();
+                                }
+
+                                if (m.MappedData == "ProductName")
+                                {
+                                    prod.ProductName = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString().Trim();
+                                }
+
+                                if (m.MappedData == "Description")
+                                {
+                                    //prod.Description = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value==null ? string.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString();
+                                    prod.Description = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? String.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString().Trim();
+                                }
+                                if (m.MappedData == "Description2")
+                                {
+                                    prod.Description2 = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? string.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString().Trim();
+                                }
+
+                                if (m.MappedData == "Color")
+                                {
+                                    string color = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? string.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString();
+
+                                    //replace special space characters
+                                    color = color.Replace('\u00A0', ' ');
+
+                                    //use Camel case instead
+                                    color = tInfo.ToTitleCase(color.ToLower());
+
+                                    prod.Color = color.Trim();
+                                }
+
+                                if (m.MappedData == "Category")
+                                {
+                                    prod.Category = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? string.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString().Trim();
+                                }
+
+                                if (m.MappedData == "Category2")
+                                {
+                                    prod.Category2 = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? string.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString().Trim();
+                                }
+
+                                if (m.MappedData == "Size")
+                                {
+                                    prod.Size = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? string.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString().Trim();
+                                }
+
+                                if (m.MappedData == "SellingUnit")
+                                {
+                                    prod.SellingUnit = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? string.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString().Trim();
+                                }
+
+                                if (m.MappedData == "UnitCost")
+                                {
+                                    prod.UnitCost = Convert.ToDouble(workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString());
+                                }
+
+                                if (m.MappedData == "SellingPrice")
+                                {
+                                    prod.SellingPrice = Convert.ToDouble(workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString());
+                                }
+
+                                if (m.MappedData == "ProductImage")
+                                {
+                                    string imgUrl = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? String.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString();
+
+                                    //if (!String.IsNullOrEmpty(imgUrl)){
+                                    //    using (var webClient = new WebClient()) {
+                                    //        byte[] imgBytes = webClient.DownloadData(imgUrl);
+                                    //        prod.ProductImage = imgBytes;
+                                    //    }
+                                    //}
+                                    //else {
+                                    //    prod.ProductImage = null;
+
+                                    prod.ProductImage = imgUrl;
+                                    //}
+                                }
+
+                                if (m.MappedData == "ProductUrl")
+                                {
+                                    prod.ProductUrl = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? string.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString();
+                                }
+
+                                if (m.MappedData == "OEM")
+                                {
+                                    prod.OEM = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? string.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString().Trim();
+                                }
+
+                                if (m.MappedData == "Quantity")
+                                {
+                                    var sentence = workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value == null ? string.Empty : workSheet.Cells[i, Convert.ToInt32(m.ColumnNumber)].Value.ToString();
+                                    //var doubleArray = Regex.Split(sentence, @"[^0-9\.]+")
+                                    //    .Where(c => c != "." && c.Trim() != "");
+
+                                    if (String.IsNullOrEmpty(sentence))
+                                    {
+                                        prod.Quantity = 1;
+                                    }
+                                    else
+                                    {
+                                        prod.Quantity = Convert.ToDouble(sentence.Trim());
+                                    }
+                                }
+                            }
+
+                            prod.Status = "Active";
+                            prod.CreateDate = DateTime.Now;
+                            prod.CreatedBy = User.Identity.Name + " (Excel Import)";
+
+                            var prodExist = products.FirstOrDefault(x => x.ProductCode == prod.ProductCode);
+                            if (prodExist == null)
+                            {
+                                productList.Add(prod);
+                                insertCount++;
+                            }
+                            else
+                            {
+                                if (prodExist.SellingPrice != prod.SellingPrice)
+                                {
+                                    var newPrice = prod.SellingPrice;
+                                    prod.SellingPrice = prodExist.SellingPrice;
+                                    //_context.Update(prod);
+                                    _context.Entry(prodExist).CurrentValues.SetValues(prod);
+
+                                    PriceHistory priceHist = new PriceHistory();
+                                    priceHist.ProductCode = prod.ProductCode;
+                                    priceHist.OldPrice = prodExist.SellingPrice;
+                                    priceHist.NewPrice = newPrice;
+                                    priceHist.Status = "Pending";
+                                    priceHist.UpdateDate = DateTime.Now;
+                                    priceHist.UpdatedBy = User.Identity.Name + "( Excel Import)";
+
+                                    _context.Add(priceHist);
+
+                                    updateCount++;
+                                }
+                            }
+                        }
+                        catch (Exception ex) {
+                            skippedCount++;
+                            continue;
+                        }
+                    }
+
+                    products.AddRange(productList);
+                    _context.SaveChanges();
+
+                    ViewBag.Message = "Successfully ";
+                    if (updateCount > 0) {
+                        ViewBag.Message += "updated " + updateCount + " record(s)";
+                        if (insertCount > 0) {
+                            ViewBag.Message += " and inserted " + insertCount + " new record(s).";
+                        }
+                        else {
+                            ViewBag.Message += ".";
+                        }
+                    }
+                    else {
+                        if (insertCount > 0) {
+                            ViewBag.Message += "inserted " + insertCount + " new record(s).";
+                        }
+                        else
+                        {
+                            ViewBag.Message = "There were no records updated or new records inserted.";
+                        }
+                    }
+
+                    if (skippedCount > 0)
+                    {
+                        ViewBag.Message += "There were also " + skippedCount + " records skipped due to wrong format. Please check the file and try re-uploading.";
+                    }
+
+                    return View(products.Take(100));
+                }
+            }            
+        } 
+
+        private string calculateGPM (double SellingPrice, double UnitCost, double Quantity)
+        {
+               double profit = (SellingPrice / Quantity) - (UnitCost / Quantity);
+               double gpm = profit / (SellingPrice / Quantity);
+               double result = Math.Round(gpm * 100);
+            
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("New Price : $ " + SellingPrice.ToString("N2") + "<br>");
+                sb.AppendLine("New GPM : " + result + " %" + "<br><hr />");
+
+                return sb.ToString();
+         }
+
+         [HttpPost]
+        public string calculateGPM (string SellingPrice, string UnitCost, string Quantity)
+        {
+            double _sellingPrice = Convert.ToDouble(SellingPrice);
+            double _unitCost = Convert.ToDouble(UnitCost);
+            double _quantity = Convert.ToDouble(Quantity);
+
+            double profit = (_sellingPrice / _quantity) - (_unitCost / _quantity);
+            double gpm = profit / (_sellingPrice / _quantity);
+            double result = Math.Round(gpm * 100);
+        
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("New Selling Price : $ " + _sellingPrice.ToString("N2") + "<br>");
+            sb.AppendLine("New GPM : " + result + " %" + "<br><hr />");
+
+            ViewBag.Message = sb.ToString();
+
+            return sb.ToString();
+        }
+
+        [HttpPost]
+        public string calculateByGPM (string GPM, string UnitCost, string Quantity)
+        {
+            double _gpm = Convert.ToDouble(GPM);
+            double _unitCost = Convert.ToDouble(UnitCost);
+            double _quantity = Convert.ToDouble(Quantity);
+
+            double sellingPrice = ((_unitCost / _quantity) / (1 - (_gpm / 100))) * _quantity;
+        
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("New Selling Price : $ " + sellingPrice.ToString("N2") + "<br>");
+            sb.AppendLine("New GPM : " + GPM + " %" + "<br><hr />");
+
+            ViewBag.Message = sb.ToString();
+
+            return sb.ToString();
+        }
+
+        private double getSellingPriceByGPM(double GPM, double UnitCost, double Quantity)
+        {
+            double _gpm = GPM;
+            double _unitCost = UnitCost;
+            double _quantity = Quantity;
+
+            double sellingPrice = ((_unitCost / _quantity) / (1 - (_gpm / 100))) * _quantity;
+
+            return sellingPrice;
+        }
+    }
+}
